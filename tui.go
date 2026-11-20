@@ -14,6 +14,7 @@ type viewKind int
 const (
 	vDash viewKind = iota
 	vAdv
+	vSensors
 )
 
 type tickMsg time.Time
@@ -31,8 +32,24 @@ var (
 	stRed    = lipgloss.NewStyle().Foreground(lipgloss.Color("203"))
 	stActive = lipgloss.NewStyle().Foreground(lipgloss.Color("42")).Bold(true)
 	stSel    = lipgloss.NewStyle().Foreground(lipgloss.Color("212")).Bold(true)
-	stSelBg  = lipgloss.NewStyle().Background(lipgloss.Color("236")).Bold(true)
 )
+
+type advItem struct{ label, kind string }
+
+var advItems = []advItem{
+	{"Platform profile · low-power", "profile:low-power"},
+	{"Platform profile · balanced", "profile:balanced"},
+	{"Platform profile · performance", "profile:performance"},
+	{"Platform profile · custom", "profile:custom"},
+	{"Fan curve · default (EC)", "curve:default"},
+	{"Fan curve · quiet", "curve:quiet"},
+	{"Fan curve · max", "curve:max"},
+	{"CPU governor · powersave", "gov:powersave"},
+	{"CPU governor · performance", "gov:performance"},
+	{"Sensors ›", "sensors"},
+	{"Diagnostics (raw values)", "diag"},
+	{"‹ Back", "back"},
+}
 
 type model struct {
 	v         viewKind
@@ -41,6 +58,8 @@ type model struct {
 	st        Status
 	curDash   int
 	curAdv    int
+	sensors   []Sensor
+	curSens   int
 	toast     string
 	toastErr  bool
 	busy      bool
@@ -69,8 +88,6 @@ func runMaxCmd(hw string, sec int, cancel <-chan struct{}) tea.Cmd {
 	}
 }
 
-// ---- update ----
-
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -78,6 +95,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tickMsg:
 		m.st = readStatus(m.hw)
+		if m.v == vSensors {
+			m.sensors = readSensors()
+		}
 		m.updated = time.Now()
 		if m.busy && m.countdown > 0 {
 			m.countdown--
@@ -105,10 +125,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if m.v == vDash {
+		switch m.v {
+		case vDash:
 			return m.updateDash(msg)
+		case vAdv:
+			return m.updateAdv(msg)
+		default:
+			return m.updateSensors(msg)
 		}
-		return m.updateAdv(msg)
 	}
 	return m, nil
 }
@@ -157,7 +181,7 @@ func (m model) updateAdv(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.curAdv--
 		}
 	case "down", "j":
-		if m.curAdv < 10 {
+		if m.curAdv < len(advItems)-1 {
 			m.curAdv++
 		}
 	case "esc", "left", "h", "backspace":
@@ -167,29 +191,47 @@ func (m model) updateAdv(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "enter":
 		m.toast, m.toastErr = "", false
-		switch m.curAdv {
-		case 0, 1, 2, 3:
-			names := []string{"low-power", "balanced", "performance", "custom"}
-			m.toast, m.toastErr = apply(func() error { return setProfile(names[m.curAdv]) }, "profile set to "+names[m.curAdv])
-		case 4:
-			m.toast, m.toastErr = apply(func() error { return setCurvePreset(m.hw, "default") }, "fan curve: default")
-		case 5:
-			m.toast, m.toastErr = apply(func() error { return setCurvePreset(m.hw, "quiet") }, "fan curve: quiet")
-		case 6:
-			m.toast, m.toastErr = apply(func() error { return setCurvePreset(m.hw, "max") }, "fan curve: max")
-		case 7:
-			setGovernor("powersave")
-			m.toast = "governor: powersave"
-		case 8:
-			setGovernor("performance")
-			m.toast = "governor: performance"
-		case 9:
-			m.toast = fmt.Sprintf("raw: profile=%s ppd=%s gov=%s fan=%d/%d temp=%d/%d",
+		it := advItems[m.curAdv]
+		switch {
+		case strings.HasPrefix(it.kind, "profile:"):
+			name := strings.TrimPrefix(it.kind, "profile:")
+			m.toast, m.toastErr = apply(func() error { return setProfile(name) }, "profile set to "+name)
+		case strings.HasPrefix(it.kind, "curve:"):
+			name := strings.TrimPrefix(it.kind, "curve:")
+			m.toast, m.toastErr = apply(func() error { return setCurvePreset(m.hw, name) }, "fan curve: "+name)
+		case strings.HasPrefix(it.kind, "gov:"):
+			setGovernor(strings.TrimPrefix(it.kind, "gov:"))
+			m.toast = "governor: " + strings.TrimPrefix(it.kind, "gov:")
+		case it.kind == "sensors":
+			m.sensors = readSensors()
+			m.curSens = 0
+			m.v = vSensors
+		case it.kind == "diag":
+			m.toast = fmt.Sprintf("profile=%s ppd=%s gov=%s fan=%d/%d temp=%d/%d",
 				m.st.Profile, m.st.PPD, m.st.Governor, m.st.Fan1, m.st.Fan2, m.st.Temp1, m.st.Temp2)
-		case 10:
+		case it.kind == "back":
 			m.v = vDash
 		}
 		m.st = readStatus(m.hw)
+	}
+	return m, nil
+}
+
+func (m model) updateSensors(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch k.String() {
+	case "up", "k":
+		if m.curSens > 0 {
+			m.curSens--
+		}
+	case "down", "j":
+		if m.curSens < len(m.sensors)-1 {
+			m.curSens++
+		}
+	case "esc", "left", "h", "backspace":
+		m.v = vAdv
+		return m, nil
+	case "q", "ctrl+c":
+		return m, tea.Quit
 	}
 	return m, nil
 }
@@ -201,7 +243,7 @@ func apply(fn func() error, okMsg string) (string, bool) {
 	return okMsg, false
 }
 
-// ---- render ----
+// ---- render helpers ----
 
 func (m model) width() int {
 	w := m.w
@@ -265,11 +307,17 @@ func spread(l, r string, w int) string {
 	return l + strings.Repeat(" ", pad) + r
 }
 
+// ---- views ----
+
 func (m model) View() string {
-	if m.v == vAdv {
+	switch m.v {
+	case vAdv:
 		return m.viewAdv()
+	case vSensors:
+		return m.viewSensors()
+	default:
+		return m.viewDash()
 	}
-	return m.viewDash()
 }
 
 func (m model) viewDash() string {
@@ -280,11 +328,10 @@ func (m model) viewDash() string {
 	var b strings.Builder
 	b.WriteString(spread(stTitle.Render("● R9000P Fan"), hs.Render(hl), w) + "\n")
 	b.WriteString(div + "\n")
-
-	fanLine := fmt.Sprintf("FAN  %d / %d rpm %s", m.st.Fan1, m.st.Fan2, bar(m.st.Fan1))
-	b.WriteString(fanLine + "\n")
-	b.WriteString(fmt.Sprintf("TEMP %s / %s      POWER %s", tempStyle(m.st.Temp1).Render(fmt.Sprintf("%d°C", m.st.Temp1)),
-		tempStyle(m.st.Temp2).Render(fmt.Sprintf("%d°C", m.st.Temp2)), m.st.PPD) + "\n")
+	b.WriteString(fmt.Sprintf("FAN  %d / %d rpm %s\n", m.st.Fan1, m.st.Fan2, bar(m.st.Fan1)))
+	b.WriteString(fmt.Sprintf("TEMP %s / %s      POWER %s\n",
+		tempStyle(m.st.Temp1).Render(fmt.Sprintf("CPU %d°C", m.st.Temp1)),
+		tempStyle(m.st.Temp2).Render(fmt.Sprintf("GPU %d°C", m.st.Temp2)), m.st.PPD))
 	b.WriteString(div + "\n")
 
 	active := currentMode(m.st)
@@ -299,7 +346,7 @@ func (m model) viewDash() string {
 	}
 	b.WriteString("\n" + stMuted.Render("Actions") + "\n")
 	b.WriteString(m.rowLine(3, "Max fan 30s     spin to max, then restore", false) + "\n")
-	b.WriteString(m.rowLine(4, "Advanced ›      fan curve · raw profile · governor", false) + "\n")
+	b.WriteString(m.rowLine(4, "Advanced ›      sensors · fan curve · profile", false) + "\n")
 	b.WriteString(div + "\n")
 
 	if m.busy {
@@ -314,8 +361,8 @@ func (m model) viewDash() string {
 		b.WriteString("\n")
 	}
 	ago := int(time.Since(m.updated).Seconds())
-	help := stMuted.Render("↑↓ move  ↵ apply  q quit")
-	b.WriteString(spread(help, stMuted.Render(fmt.Sprintf("updated %ds ago", ago)), w) + "\n")
+	b.WriteString(spread(stMuted.Render("↑↓ move  ↵ apply  q quit"),
+		stMuted.Render(fmt.Sprintf("updated %ds ago", ago)), w) + "\n")
 	return b.String()
 }
 
@@ -342,28 +389,15 @@ func (m model) rowLine(idx int, text string, active bool) string {
 func (m model) viewAdv() string {
 	w := m.width()
 	div := stDiv.Render(strings.Repeat("─", w))
-	rows := []string{
-		"Platform profile · low-power",
-		"Platform profile · balanced",
-		"Platform profile · performance",
-		"Platform profile · custom",
-		"Fan curve · default (EC)",
-		"Fan curve · quiet",
-		"Fan curve · max",
-		"CPU governor · powersave",
-		"CPU governor · performance",
-		"Diagnostics (show raw values)",
-		"‹ Back",
-	}
 	var b strings.Builder
 	b.WriteString(spread(stTitle.Render("R9000P Fan · Advanced"), stMuted.Render("esc back"), w) + "\n")
 	b.WriteString(div + "\n")
-	for i, r := range rows {
+	for i, it := range advItems {
 		mark := "  "
 		if i == m.curAdv {
 			mark = "▸ "
 		}
-		line := mark + r
+		line := mark + it.label
 		if i == m.curAdv {
 			b.WriteString(stSel.Render(line) + "\n")
 		} else {
@@ -381,6 +415,52 @@ func (m model) viewAdv() string {
 		b.WriteString("\n")
 	}
 	b.WriteString(stMuted.Render("↑↓ move   ↵ apply   esc/← back   q quit") + "\n")
+	return b.String()
+}
+
+func (m model) viewSensors() string {
+	w := m.width()
+	div := stDiv.Render(strings.Repeat("─", w))
+	var b strings.Builder
+	b.WriteString(spread(stTitle.Render("R9000P Fan · Sensors"), stMuted.Render("esc back"), w) + "\n")
+	b.WriteString(div + "\n")
+
+	visible := m.h - 6
+	if visible < 5 {
+		visible = 5
+	}
+	n := len(m.sensors)
+	off := 0
+	if m.curSens >= visible {
+		off = m.curSens - visible + 1
+	}
+	end := off + visible
+	if end > n {
+		end = n
+	}
+	if n == 0 {
+		b.WriteString(stMuted.Render("no sensors found") + "\n")
+	}
+	for i := off; i < end; i++ {
+		s := m.sensors[i]
+		mark := "  "
+		if i == m.curSens {
+			mark = "▸ "
+		}
+		name := fmt.Sprintf("%-8s %-22s", sensorTitle(s), s.Label)
+		line := mark + name + tempStyle(s.Temp).Render(fmt.Sprintf("%3d°C", s.Temp))
+		if i == m.curSens {
+			b.WriteString(stSel.Render(mark+name) + tempStyle(s.Temp).Render(fmt.Sprintf("%3d°C", s.Temp)) + "\n")
+		} else {
+			b.WriteString(line + "\n")
+		}
+	}
+	b.WriteString(div + "\n")
+	pos := ""
+	if n > 0 {
+		pos = fmt.Sprintf("%d/%d", m.curSens+1, n)
+	}
+	b.WriteString(spread(stMuted.Render("↑↓ scroll   esc/← back   q quit"), stMuted.Render(pos), w) + "\n")
 	return b.String()
 }
 
