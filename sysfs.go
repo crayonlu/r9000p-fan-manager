@@ -12,7 +12,9 @@ import (
 	"time"
 )
 
-const (
+// Paths are variables rather than constants so tests can point them at a fake
+// sysfs tree.
+var (
 	profileClassPath = "/sys/class/platform-profile/platform-profile-0/profile"
 	profileACPIpath  = "/sys/firmware/acpi/platform_profile"
 	statePath        = "/var/tmp/r9000p-fan-manager.state"
@@ -177,17 +179,33 @@ func restoreState(hw string) error {
 	if err != nil {
 		return err
 	}
-	if len(st.Curve) == 10 {
-		_ = writeCurve(hw, st.Curve)
-	}
-	if st.Profile != "" {
-		_ = setProfile(st.Profile)
-	}
+	var firstErr error
+
+	// Restore in the same order the modes are applied (see setMode): power
+	// profile first, then the platform profile. The platform profile is set
+	// last so it stays authoritative over power-profiles-daemon.
 	if st.PPD != "" {
 		ppdSet(st.PPD)
 	}
-	_ = os.Remove(statePath)
-	return nil
+	if st.Profile != "" {
+		if e := setProfile(st.Profile); e != nil && firstErr == nil {
+			firstErr = e
+		}
+	}
+	// Writing the platform profile makes the firmware load that mode's own
+	// default fan curve, and custom curve points only take effect in custom
+	// mode. So a stored curve must be written after switching to custom, and
+	// must not be written at all when returning to a firmware-managed mode
+	// (otherwise a leftover software curve keeps the EC in custom).
+	if st.Profile == "custom" && len(st.Curve) == 10 {
+		if e := writeCurve(hw, st.Curve); e != nil && firstErr == nil {
+			firstErr = e
+		}
+	}
+	if firstErr == nil {
+		_ = os.Remove(statePath)
+	}
+	return firstErr
 }
 
 // quietOn applies the night/quiet profile: power-saver + gentle fan curve.
@@ -209,19 +227,21 @@ func quietOff(hw string) error {
 	if _, err := os.Stat(statePath); err == nil {
 		return restoreState(hw)
 	}
-	_ = setProfile("balanced")
 	ppdSet("balanced")
 	setGovernor("powersave")
+	_ = setProfile("balanced")
 	return nil
 }
 
 // maxFan runs fans at max for sec seconds, then restores the previous state.
-func maxFan(hw string, sec int, progress func(remaining int, st Status)) error {
+func maxFan(hw string, sec int, progress func(remaining int, st Status)) (err error) {
 	if err := saveState(hw); err != nil {
 		return err
 	}
 	defer func() {
-		_ = restoreState(hw)
+		if rerr := restoreState(hw); rerr != nil && err == nil {
+			err = rerr
+		}
 	}()
 	all := make([]int, 10)
 	for i := range all {

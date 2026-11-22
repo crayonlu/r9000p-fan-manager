@@ -66,11 +66,15 @@ func setCurvePreset(hw, preset string) error {
 
 // maxFanCancelable spins fans to max for sec seconds, restoring the previous
 // state afterwards. Closing cancel aborts early (still restores).
-func maxFanCancelable(hw string, sec int, cancel <-chan struct{}) error {
+func maxFanCancelable(hw string, sec int, cancel <-chan struct{}) (err error) {
 	if err := saveState(hw); err != nil {
 		return err
 	}
-	defer func() { _ = restoreState(hw) }()
+	defer func() {
+		if rerr := restoreState(hw); rerr != nil && err == nil {
+			err = rerr
+		}
+	}()
 	if err := setProfile("custom"); err != nil {
 		return err
 	}
